@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import openai
@@ -265,12 +265,20 @@ async def parse_message(text: str) -> dict | None:
         kind = "task"
     parsed_text = data.get("text")
     parsed_text = parsed_text.strip() if isinstance(parsed_text, str) else ""
+    due_date = _valid_date(data.get("due_date"))
+    due_time = _valid_time(data.get("due_time"))
+    # Модель иногда ставит уже прошедшее сегодня время («в 8 вечера», сказанное в 23:00) —
+    # напоминание сработало бы сразу. Такую задачу переносим на завтра.
+    if kind == "task" and due_date and due_time:
+        now = datetime.now(ZoneInfo(settings.timezone))
+        if due_date == now.date().isoformat() and due_time < now.strftime("%H:%M"):
+            due_date = (now.date() + timedelta(days=1)).isoformat()
     return {
         "kind": kind,
         "text": parsed_text or text.strip(),
         "domain": domain,
-        "due_date": _valid_date(data.get("due_date")),
-        "due_time": _valid_time(data.get("due_time")),
+        "due_date": due_date,
+        "due_time": due_time,
         "recurrence": rec,
     }
 
