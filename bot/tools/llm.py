@@ -147,6 +147,8 @@ _PARSE_PROMPT = """\
 ДАТА И ВРЕМЯ
 - due_date вычисляй относительно текущей даты из блока «Сейчас». «В пятницу» — ближайшая \
 пятница, включая сегодня. «На утро» без точного времени → due_time null.
+- Если названо только время (без дня) и сегодня это время уже прошло — due_date = завтра. \
+«Через N минут/часов» — прибавь к текущему времени (с переходом через полночь).
 - ВАЖНО: имена и отчества («Августа Сергеевича», «Мая», «Марта») — НЕ даты. \
 Если даты нет — null, ничего не выдумывай.
 - Для meeting due_date + due_time — начало встречи.
@@ -324,6 +326,32 @@ async def summarize_transcript(text: str) -> str:
         messages=[
             {"role": "system", "content": _SUMMARY_PROMPT + "\n\n" + now_context()},
             {"role": "user", "content": text[:60000]},
+        ],
+        extra_headers={"HTTP-Referer": "https://github.com/brain-bot", "X-Title": "brain"},
+    )
+    return resp.choices[0].message.content or ""
+
+
+_SHORT_SUMMARY_PROMPT = """\
+Ты делаешь короткую выжимку текста (пересланное сообщение, статья) для Даниила.
+
+Формат ответа строго такой, без вступлений и заключений:
+Первая строка: «# » и короткий заголовок (до 8 слов).
+Далее 3–6 пунктов Markdown-списком, каждый с «- ».
+
+Пиши на русском, плотно. Не выдумывай того, чего нет в тексте."""
+
+
+async def summarize_short(text: str) -> str:
+    """Короткая выжимка: «# заголовок» + список из 3–6 пунктов. Ошибки пробрасываются."""
+    client = _get_client()
+    resp = await client.chat.completions.create(
+        model=settings.llm_fast_model,
+        extra_body=_FAST_EXTRA,
+        max_tokens=600,
+        messages=[
+            {"role": "system", "content": _SHORT_SUMMARY_PROMPT + "\n\n" + now_context()},
+            {"role": "user", "content": text[:20000]},
         ],
         extra_headers={"HTTP-Referer": "https://github.com/brain-bot", "X-Title": "brain"},
     )

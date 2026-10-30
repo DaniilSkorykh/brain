@@ -14,6 +14,7 @@ from bot.handlers import (
     extract,
     files,
     habits,
+    inbox,
     meetings,
     menu,
     notes,
@@ -75,6 +76,7 @@ def build_dispatcher() -> Dispatcher:
     dp.include_router(menu.router)
     dp.include_router(extract.router)
     dp.include_router(files.router)
+    dp.include_router(inbox.router)
     dp.include_router(voice.router)
     dp.include_router(ask.router)
     return dp

@@ -8,3 +8,5 @@ aiosqlite
 dateparser
 apscheduler>=3.10,<4
 tzdata
+trafilatura
+httpx
