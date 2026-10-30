@@ -85,6 +85,13 @@ SYSTEM_PROMPT = """\
 # и отбивает запрос с 402, если баланса не хватает на этот максимум.
 MAX_TOKENS = 2000
 
+# Reasoning через OpenRouter: у Sonnet 5.5 он обязателен, и «размышления» съедают max_tokens
+# (ответ обрывается). effort=low для основной модели — ответы без лишних размышлений;
+# у быстрой модели для парсинга reasoning выключаем полностью — иначе на неоднозначных
+# фразах она тратит весь лимит на размышления и возвращает пустой ответ.
+_MAIN_EXTRA = {"reasoning": {"effort": "low"}}
+_FAST_EXTRA = {"reasoning": {"enabled": False}}
+
 _client: openai.AsyncOpenAI | None = None
 
 
@@ -216,7 +223,8 @@ async def parse_message(text: str) -> dict | None:
         client = _get_client()
         resp = await client.chat.completions.create(
             model=settings.llm_fast_model,
-            max_tokens=300,
+            max_tokens=500,
+            extra_body=_FAST_EXTRA,
             messages=[
                 {"role": "system", "content": _PARSE_PROMPT + "\n\n" + now_context()},
                 {"role": "user", "content": text},
@@ -241,6 +249,9 @@ async def parse_message(text: str) -> dict | None:
         rec = None
     else:
         rec = rec.strip()
+    # У встреч нет повтора — регулярное событие ведём как повторяющуюся задачу с напоминанием
+    if kind == "meeting" and rec:
+        kind = "task"
     parsed_text = data.get("text")
     parsed_text = parsed_text.strip() if isinstance(parsed_text, str) else ""
     return {
@@ -261,6 +272,7 @@ async def extract_tasks(text: str) -> list[dict]:
     try:
         resp = await client.chat.completions.create(
             model=settings.llm_model,
+            extra_body=_MAIN_EXTRA,
             max_tokens=1000,
             messages=[
                 {"role": "system", "content": _EXTRACT_PROMPT + "\n\n" + now_context()},
@@ -298,6 +310,7 @@ async def summarize_transcript(text: str) -> str:
     client = _get_client()
     resp = await client.chat.completions.create(
         model=settings.llm_model,
+        extra_body=_MAIN_EXTRA,
         max_tokens=1500,
         messages=[
             {"role": "system", "content": _SUMMARY_PROMPT + "\n\n" + now_context()},
@@ -342,6 +355,7 @@ async def ask_llm(question: str, chunks: list[dict]) -> str:
     client = _get_client()
     resp = await client.chat.completions.create(
         model=settings.llm_model,
+        extra_body=_MAIN_EXTRA,
         max_tokens=MAX_TOKENS,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT.format(now=now_context(), context=context)},
