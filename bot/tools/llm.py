@@ -123,7 +123,7 @@ _EXTRACT_PROMPT = """\
 _PARSE_PROMPT = """\
 Ты разбираешь короткое сообщение Даниила (набранное или надиктованное) и определяешь, что с ним делать.
 
-Верни СТРОГО один JSON-объект и ничего вокруг (никакого текста, без ```):
+Верни СТРОГО один JSON-объект и ничего вокруг (никакого текста, рассуждений и ```). \nЕсли в сообщении несколько дел — всё равно ОДИН объект: объедини их в text через «; ».
 {"kind": "task|meeting|note|question", "text": "...", "domain": "technored|ministry|personal", \
 "due_date": "YYYY-MM-DD или null", "due_time": "HH:MM или null", "recurrence": "строка или null"}
 
@@ -177,21 +177,30 @@ _RECURRENCE_RE = re.compile(r"daily|wd:[0-6](,[0-6])*|monthly:([1-9]|[12]\d|3[01
 
 
 def _parse_json(raw: str) -> dict | None:
-    """Достаёт JSON-объект из ответа LLM: убирает ```-обёртку, берёт от первой { до последней }."""
-    try:
-        s = (raw or "").strip()
-        s = re.sub(r"^```(?:json)?\s*", "", s)
-        s = re.sub(r"\s*```$", "", s)
-        start, end = s.find("{"), s.rfind("}")
-        if start == -1 or end <= start:
-            raise ValueError("нет JSON-объекта")
-        data = json.loads(s[start:end + 1])
-        if not isinstance(data, dict):
-            raise ValueError("не объект")
-        return data
-    except Exception:
-        logger.warning("Не удалось разобрать JSON из ответа LLM: %.500s", raw)
-        return None
+    """Достаёт JSON-объект из ответа LLM.
+
+    Сначала — весь фрагмент от первой { до последней } (```-обёртка не мешает).
+    Если там рассуждения или несколько объектов — первый объект, который парсится целиком.
+    """
+    s = (raw or "").strip()
+    start, end = s.find("{"), s.rfind("}")
+    if start != -1 and end > start:
+        try:
+            data = json.loads(s[start:end + 1])
+            if isinstance(data, dict):
+                return data
+        except ValueError:
+            pass
+        decoder = json.JSONDecoder()
+        for m in re.finditer(r"\{", s):
+            try:
+                data, _ = decoder.raw_decode(s, m.start())
+            except ValueError:
+                continue
+            if isinstance(data, dict):
+                return data
+    logger.warning("Не удалось разобрать JSON из ответа LLM: %.500s", raw)
+    return None
 
 
 def _valid_date(value) -> str | None:
