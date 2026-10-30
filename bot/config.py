@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     openrouter_api_key: str = ""
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     llm_model: str = "anthropic/claude-sonnet-4-5"
+    # Дешёвая модель для парсинга/классификации сообщений
+    llm_fast_model: str = "anthropic/claude-haiku-5.5"
 
     # Paths
     knowledge_dir: str = "/app/knowledge"

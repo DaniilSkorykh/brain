@@ -14,6 +14,7 @@ from aiogram.types import (
     Message,
 )
 
+from bot.tools.llm import parse_message
 from db.database import (
     add_task,
     complete_task,
@@ -95,28 +96,93 @@ def _parse_due(text: str) -> tuple[str | None, str]:
         return None, text
 
 
+_WEEKDAYS_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+
+
+def human_recurrence(rec: str | None) -> str:
+    """'daily' -> 'каждый день', 'wd:0,2' -> 'Пн, Ср', 'monthly:1' -> 'каждое 1-е число'."""
+    if not rec:
+        return ""
+    if rec == "daily":
+        return "каждый день"
+    if rec.startswith("wd:"):
+        days = [int(d) for d in rec[3:].split(",") if d.isdigit() and int(d) < 7]
+        if days == [0, 1, 2, 3, 4]:
+            return "по будням"
+        return ", ".join(_WEEKDAYS_RU[d] for d in days)
+    if rec.startswith("monthly:"):
+        return f"каждое {rec[8:]}-е число"
+    return rec
+
+
+def _format_due(due_date: str | None, due_time: str | None) -> str:
+    """'2026-10-31', '21:00' -> 'Сб 31.10 21:00'; без срока -> 'без срока'."""
+    if not due_date:
+        return "без срока"
+    try:
+        d = date.fromisoformat(due_date)
+        s = f"{_WEEKDAYS_RU[d.weekday()]} {d.strftime('%d.%m')}"
+    except ValueError:
+        s = due_date
+    return f"{s} {due_time}" if due_time else s
+
+
+def task_line(t: dict, week: bool = False) -> str:
+    """Строка задачи для списков. Обычная: '🟢 21:00 текст (домен)'; week: '🟡 текст — 2026-10-31 21:00'."""
+    emoji = urgency_emoji(t["due_date"])
+    if week:
+        when = f"{t['due_date']} {t['due_time']}" if t.get("due_time") else t["due_date"]
+        return f"{emoji} {t['text']} — {when}"
+    time_part = f"{t['due_time']} " if t.get("due_time") else ""
+    return f"{emoji} {time_part}{t['text']} ({t['domain']})"
+
+
+async def create_task_from_parsed(parsed: dict) -> dict:
+    """Создаёт задачу из результата llm.parse_message."""
+    task_id = await add_task(
+        parsed["text"],
+        parsed.get("domain") or "personal",
+        parsed.get("due_date"),
+        parsed.get("due_time"),
+        parsed.get("recurrence"),
+    )
+    return {
+        "id": task_id,
+        "text": parsed["text"],
+        "domain": parsed.get("domain") or "personal",
+        "due_date": parsed.get("due_date"),
+        "due_time": parsed.get("due_time"),
+        "recurrence": parsed.get("recurrence"),
+    }
+
+
 async def create_task_from_text(raw: str) -> dict | None:
     """Парсит '#домен текст дата' → создаёт задачу. None, если нет текста задачи.
 
+    Сначала LLM (parse_message), при неудаче — dateparser. Явный #домен приоритетнее LLM.
     Переиспользуется командой /task, FSM-флоу и голосовыми сообщениями.
     """
-    domain, remaining = _parse_domain(raw.strip())
+    raw = raw.strip()
+    explicit = bool(_DOMAIN_PATTERN.search(raw))
+    domain, remaining = _parse_domain(raw)
+    if not remaining.strip():
+        return None
+
+    parsed = await parse_message(remaining)
+    if parsed is not None:
+        # kind игнорируем — пользователь явно создаёт задачу
+        if explicit:
+            parsed["domain"] = domain
+        return await create_task_from_parsed(parsed)
+
     due_date, task_text = _parse_due(remaining)
     task_text = task_text.strip()
     if not task_text:
         return None
-    task_id = await add_task(task_text, domain, due_date)
-    return {"id": task_id, "text": task_text, "domain": domain, "due_date": due_date}
-
-
-def format_task_added(task: dict) -> str:
-    due_str = task["due_date"] if task["due_date"] else "без срока"
-    return (
-        f"✅ Задача добавлена #{task['id']}\n"
-        f"Текст: {task['text']}\n"
-        f"Домен: {task['domain']}\n"
-        f"Срок: {due_str}"
-    )
+    return await create_task_from_parsed({
+        "text": task_text, "domain": domain, "due_date": due_date,
+        "due_time": None, "recurrence": None,
+    })
 
 
 @router.message(Command("task"))
@@ -143,7 +209,10 @@ async def cmd_task(message: Message, command: CommandObject) -> None:
         )
         return
 
-    await message.answer(format_task_added(task))
+    # Локальный импорт: cards.py импортирует tasks.py (избегаем цикла)
+    from bot.handlers.cards import send_task_card
+
+    await send_task_card(message, task, raw=args.strip())
 
 
 @router.message(Command("today"))
@@ -155,8 +224,7 @@ async def cmd_today(message: Message) -> None:
 
     lines = ["Задачи на сегодня и просроченные:"]
     for t in tasks:
-        emoji = urgency_emoji(t["due_date"])
-        lines.append(f"{emoji} {t['text']} ({t['domain']})")
+        lines.append(task_line(t))
     await message.answer("\n".join(lines))
 
 
@@ -183,8 +251,7 @@ async def cmd_week(message: Message) -> None:
     for domain in ordered_domains:
         lines.append(f"\n[{domain}]")
         for t in groups[domain]:
-            emoji = urgency_emoji(t["due_date"])
-            lines.append(f"  {emoji} {t['text']} — {t['due_date']}")
+            lines.append("  " + task_line(t, week=True))
 
     await message.answer("\n".join(lines))
 
@@ -204,8 +271,7 @@ async def build_evening_view() -> tuple[str, InlineKeyboardMarkup | None]:
     lines = ["🌙 Итоги дня. Что закрыто? Отметь ✅, остальное перенесём на завтра:", ""]
     rows: list[list[InlineKeyboardButton]] = []
     for t in tasks:
-        emoji = urgency_emoji(t["due_date"])
-        lines.append(f"{emoji} {t['text']} ({t['domain']})")
+        lines.append(task_line(t))
         rows.append([
             InlineKeyboardButton(
                 text=f"✅ {_short(t['text'])}",
@@ -229,6 +295,16 @@ async def cb_done(callback: CallbackQuery) -> None:
     text, markup = await build_evening_view()
     if callback.message:
         await callback.message.edit_text(text, reply_markup=markup)
+
+
+@router.callback_query(F.data.startswith("tdone:"))
+async def cb_task_reminder_done(callback: CallbackQuery) -> None:
+    """Кнопка «✅ Сделано» под напоминанием о задаче."""
+    task_id = int(callback.data.split(":", 1)[1])
+    await complete_task(task_id)
+    await callback.answer("Готово ✅")
+    if callback.message and callback.message.text:
+        await callback.message.edit_text(callback.message.text + "\n\n✅ Сделано", reply_markup=None)
 
 
 @router.callback_query(F.data == "rollover")

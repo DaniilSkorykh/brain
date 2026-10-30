@@ -1,4 +1,4 @@
-"""Планировщик фоновых задач: утренний дайджест, вечерняя сводка, напоминания о встречах."""
+"""Планировщик фоновых задач: утренний дайджест, вечерняя сводка, напоминания о встречах и задачах."""
 from __future__ import annotations
 
 import logging
@@ -12,12 +12,14 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from bot.config import settings
 from bot.handlers.habits import _streak_for
-from bot.handlers.tasks import build_evening_view, urgency_emoji
+from bot.handlers.tasks import build_evening_view, task_line
 from db.database import (
     get_due_meetings,
+    get_due_task_reminders,
     get_habits_due,
     get_today_tasks,
     mark_meeting_reminded,
+    mark_task_reminded,
 )
 
 logger = logging.getLogger(__name__)
@@ -42,8 +44,7 @@ async def send_morning_digest(bot: Bot) -> None:
     if tasks:
         lines.append("Задачи на сегодня:")
         for t in tasks:
-            emoji = urgency_emoji(t["due_date"])
-            lines.append(f"{emoji} {t['text']} ({t['domain']})")
+            lines.append(task_line(t))
         lines.append("\n🔴 просрочено · 🟢 сегодня")
     else:
         lines.append("На сегодня задач нет 🎉")
@@ -77,8 +78,8 @@ async def send_evening_review(bot: Bot) -> None:
     await bot.send_message(uid, text, reply_markup=markup)
 
 
-async def check_meeting_reminders(bot: Bot) -> None:
-    """Каждую минуту: напоминает о встречах, до которых <= окна напоминания."""
+async def check_reminders(bot: Bot) -> None:
+    """Каждую минуту: напоминания о встречах (за окно до начала) и о задачах со временем."""
     uid = settings.telegram_allowed_user_id
     now = datetime.now()
     now_iso = now.strftime("%Y-%m-%d %H:%M:%S")
@@ -92,6 +93,18 @@ async def check_meeting_reminders(bot: Bot) -> None:
             when = m["start_at"]
         await bot.send_message(uid, f"🔔 Через час встреча: {m['title']} — в {when}")
         await mark_meeting_reminded(m["id"])
+
+    task_now = now.strftime("%Y-%m-%d %H:%M")
+    for t in await get_due_task_reminders(task_now):
+        try:
+            suffix = " (🔁)" if t.get("recurrence") else ""
+            kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="✅ Сделано", callback_data=f"tdone:{t['id']}")
+            ]])
+            await bot.send_message(uid, f"⏰ Напоминаю: {t['text']}{suffix}", reply_markup=kb)
+            await mark_task_reminded(t["id"])
+        except Exception:
+            logger.exception("Не удалось отправить напоминание о задаче %s", t["id"])
 
 
 def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
@@ -117,7 +130,7 @@ def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
     )
 
     scheduler.add_job(
-        check_meeting_reminders,
+        check_reminders,
         IntervalTrigger(minutes=1),
         args=[bot],
         id="meeting_reminders",

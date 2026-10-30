@@ -22,6 +22,17 @@ async def init_db() -> None:
     schema = _SCHEMA_PATH.read_text(encoding="utf-8")
     async with aiosqlite.connect(DB_PATH) as db:
         await db.executescript(schema)
+        # Миграция: новые колонки tasks для уже существующих БД
+        cursor = await db.execute("PRAGMA table_info(tasks)")
+        existing = {row[1] for row in await cursor.fetchall()}
+        for name, ddl in (
+            ("due_time", "TEXT"),
+            ("reminder_sent", "BOOLEAN DEFAULT 0"),
+            ("recurrence", "TEXT"),
+        ):
+            if name not in existing:
+                await db.execute(f"ALTER TABLE tasks ADD COLUMN {name} {ddl}")
+                logger.info("Миграция: добавлена колонка tasks.%s", name)
         await db.commit()
     logger.info("Database initialised at %s", DB_PATH)
 
@@ -30,15 +41,81 @@ async def add_task(
     text: str,
     domain: str = "personal",
     due_date: str | None = None,
+    due_time: str | None = None,
+    recurrence: str | None = None,
 ) -> int:
     """Вставляет задачу, возвращает id новой строки."""
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
-            "INSERT INTO tasks (text, domain, due_date) VALUES (?, ?, ?)",
-            (text, domain, due_date),
+            "INSERT INTO tasks (text, domain, due_date, due_time, recurrence) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (text, domain, due_date, due_time, recurrence),
         )
         await db.commit()
         return cursor.lastrowid  # type: ignore[return-value]
+
+
+async def get_task(task_id: int) -> dict | None:
+    """Задача по id или None."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT id, text, domain, due_date, due_time, recurrence, is_done "
+            "FROM tasks WHERE id = ?",
+            (task_id,),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
+async def delete_task(task_id: int) -> bool:
+    """Удаляет задачу. True если строка удалена."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+async def update_task_due(task_id: int, due_date: str | None, due_time: str | None) -> bool:
+    """Меняет срок задачи и сбрасывает признак отправленного напоминания."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "UPDATE tasks SET due_date = ?, due_time = ?, reminder_sent = 0 WHERE id = ?",
+            (due_date, due_time, task_id),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+async def get_due_task_reminders(now_iso: str) -> list[dict]:
+    """Задачи со временем, которым пора напомнить (now_iso — 'YYYY-MM-DD HH:MM').
+
+    Старше 1 дня не берём — чтобы после миграции/простоя не прилетела пачка старья.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT id, text, domain, due_date, due_time, recurrence
+            FROM tasks
+            WHERE is_done = 0
+              AND due_date IS NOT NULL
+              AND due_time IS NOT NULL
+              AND reminder_sent = 0
+              AND due_date || ' ' || due_time <= substr(?, 1, 16)
+              AND due_date >= date(substr(?, 1, 10), '-1 day')
+            ORDER BY due_date ASC, due_time ASC
+            """,
+            (now_iso, now_iso),
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
+async def mark_task_reminded(task_id: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE tasks SET reminder_sent = 1 WHERE id = ?", (task_id,))
+        await db.commit()
 
 
 async def get_today_tasks() -> list[dict]:
@@ -47,12 +124,12 @@ async def get_today_tasks() -> list[dict]:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
             """
-            SELECT id, text, domain, due_date
+            SELECT id, text, domain, due_date, due_time, recurrence
             FROM tasks
             WHERE is_done = 0
               AND due_date IS NOT NULL
               AND due_date <= date('now', 'localtime')
-            ORDER BY due_date ASC
+            ORDER BY due_date ASC, due_time IS NULL, due_time ASC
             """
         )
         rows = await cursor.fetchall()
@@ -65,13 +142,13 @@ async def get_week_tasks() -> list[dict]:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
             """
-            SELECT id, text, domain, due_date
+            SELECT id, text, domain, due_date, due_time, recurrence
             FROM tasks
             WHERE is_done = 0
               AND due_date IS NOT NULL
               AND due_date >= date('now', 'localtime')
               AND due_date <= date('now', 'localtime', '+7 days')
-            ORDER BY domain ASC, due_date ASC
+            ORDER BY domain ASC, due_date ASC, due_time IS NULL, due_time ASC
             """
         )
         rows = await cursor.fetchall()
@@ -87,6 +164,47 @@ async def add_meeting(title: str, domain: str, start_at: str) -> int:
         )
         await db.commit()
         return cursor.lastrowid  # type: ignore[return-value]
+
+
+async def get_meeting(meeting_id: int) -> dict | None:
+    """Встреча по id или None."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT id, title, domain, start_at FROM meetings WHERE id = ?",
+            (meeting_id,),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
+async def delete_meeting(meeting_id: int) -> bool:
+    """Удаляет встречу. True если строка удалена."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("DELETE FROM meetings WHERE id = ?", (meeting_id,))
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+async def update_meeting_start(meeting_id: int, start_at: str) -> bool:
+    """Меняет время встречи и сбрасывает признак отправленного напоминания."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "UPDATE meetings SET start_at = ?, reminder_sent = 0 WHERE id = ?",
+            (start_at, meeting_id),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+async def clear_task_recurrence(task_id: int) -> bool:
+    """Убирает повторение у задачи."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "UPDATE tasks SET recurrence = NULL WHERE id = ?", (task_id,)
+        )
+        await db.commit()
+        return cursor.rowcount > 0
 
 
 async def get_due_meetings(now_iso: str, limit_iso: str) -> list[dict]:
@@ -141,7 +259,7 @@ async def rollover_unfinished(to_date: str) -> int:
         cursor = await db.execute(
             """
             UPDATE tasks
-            SET due_date = ?
+            SET due_date = ?, reminder_sent = 0
             WHERE is_done = 0
               AND due_date IS NOT NULL
               AND due_date <= date('now', 'localtime')

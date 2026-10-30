@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import openai
 
@@ -11,6 +14,25 @@ from bot.config import settings
 logger = logging.getLogger(__name__)
 
 _KNOWN_DOMAINS = ("technored", "ministry", "personal")
+_KNOWN_KINDS = ("task", "meeting", "note", "question")
+
+_WEEKDAYS = [
+    "понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье",
+]
+_MONTHS_GEN = [
+    "января", "февраля", "марта", "апреля", "мая", "июня",
+    "июля", "августа", "сентября", "октября", "ноября", "декабря",
+]
+
+
+def now_context() -> str:
+    """Строка с текущим временем для промптов: «Сейчас: пятница, 30 октября 2026, 18:31 (Europe/Moscow)»."""
+    now = datetime.now(ZoneInfo(settings.timezone))
+    return (
+        f"Сейчас: {_WEEKDAYS[now.weekday()]}, {now.day} {_MONTHS_GEN[now.month - 1]} "
+        f"{now.year}, {now.strftime('%H:%M')} ({settings.timezone})"
+    )
+
 
 SYSTEM_PROMPT = """\
 Ты — личный ассистент Даниила. Отвечаешь на русском, на «ты», обращение — «Даниил».
@@ -51,6 +73,10 @@ SYSTEM_PROMPT = """\
 - Не напоминать о своих ограничениях без необходимости.
 - Не заканчивать дежурным «что ещё я могу сделать».
 
+ТЕКУЩЕЕ ВРЕМЯ
+{now}
+Используй его для «сегодня/завтра/на этой неделе».
+
 Контекст из базы знаний:
 {context}"""
 
@@ -72,40 +98,6 @@ def _get_client() -> openai.AsyncOpenAI:
     return _client
 
 
-CLASSIFY_PROMPT = """\
-Определи тип сообщения Даниила и ответь РОВНО одним словом на английском: \
-task, meeting, question или note.
-
-- task — нужно что-то сделать, поручение, дело (купить, позвонить, подготовить, дедлайн).
-- meeting — про встречу/созвон с конкретным временем (встреча завтра в 15:00).
-- question — вопрос или просьба что-то рассказать, найти, объяснить.
-- note — мысль, идея, факт «на запомнить», не требующие действия.
-
-Ответь только одним словом, без точки и пояснений."""
-
-_VALID_INTENTS = ("meeting", "task", "note", "question")
-
-
-async def classify_intent(text: str) -> str:
-    """Классифицирует текст в одно из: note / task / question / meeting."""
-    client = _get_client()
-    resp = await client.chat.completions.create(
-        model=settings.llm_model,
-        max_tokens=8,
-        messages=[
-            {"role": "system", "content": CLASSIFY_PROMPT},
-            {"role": "user", "content": text},
-        ],
-        extra_headers={"HTTP-Referer": "https://github.com/brain-bot", "X-Title": "brain"},
-    )
-    raw = (resp.choices[0].message.content or "").strip().lower()
-    # meeting проверяем первым: встреча тоже подразумевает действие
-    for intent in _VALID_INTENTS:
-        if intent in raw:
-            return intent
-    return "question"
-
-
 _EXTRACT_PROMPT = """\
 Ты выделяешь конкретные задачи и договорённости из текста (заметки встречи, конспекта).
 
@@ -113,25 +105,156 @@ _EXTRACT_PROMPT = """\
 Игнорируй общие рассуждения без действия.
 
 Верни СТРОГО JSON-объект вида:
-{"tasks": [{"text": "...", "domain": "...", "due_date": "YYYY-MM-DD или null"}]}
+{"tasks": [{"text": "...", "domain": "...", "due_date": "YYYY-MM-DD или null", "due_time": "HH:MM или null"}]}
 
 - text — кратко и в повелительном наклонении («подготовить материалы», «позвонить N»).
 - domain — один из: technored, ministry, personal. Если не ясно — personal.
 - due_date — ISO-дата, если в тексте есть срок; иначе null.
+- due_time — время «HH:MM», если оно явно названо; иначе null.
 Если задач нет — верни {"tasks": []}. Никакого текста вне JSON."""
+
+_PARSE_PROMPT = """\
+Ты разбираешь короткое сообщение Даниила (набранное или надиктованное) и определяешь, что с ним делать.
+
+Верни СТРОГО один JSON-объект и ничего вокруг (никакого текста, без ```):
+{"kind": "task|meeting|note|question", "text": "...", "domain": "technored|ministry|personal", \
+"due_date": "YYYY-MM-DD или null", "due_time": "HH:MM или null", "recurrence": "строка или null"}
+
+ТИП (kind)
+- task — нужно что-то сделать, в т.ч. «напомни…», «позвонить в 21:00», «купить завтра». \
+Задача МОЖЕТ иметь время — это напоминание, а НЕ встреча.
+- meeting — только событие с участием других людей в конкретное время: встреча, созвон, \
+собрание, репетиция, служение. «Позвонить кому-то» — это task, не meeting.
+- question — вопрос или просьба найти, объяснить, рассказать.
+- note — мысль, идея, факт для запоминания, без действия.
+
+ТЕКСТ (text)
+Очищенная формулировка: без слов «задача», «напомни мне», «добавь», без даты/времени/повторения. \
+Для задач — в инфинитиве или повелительном виде. Для note/question — исходный смысл без искажений.
+
+ДОМЕН (domain)
+- technored — работа в ТехноРэд: роботы, REDWELD, REDLOAD, RAG, документация, патенты.
+- ministry — служение (НЕ)ОДИН: церковь, молодёжь, прославление, звук, домашняя группа.
+- personal — всё остальное.
+
+ДАТА И ВРЕМЯ
+- due_date вычисляй относительно текущей даты из блока «Сейчас». «В пятницу» — ближайшая \
+пятница, включая сегодня. «На утро» без точного времени → due_time null.
+- ВАЖНО: имена и отчества («Августа Сергеевича», «Мая», «Марта») — НЕ даты. \
+Если даты нет — null, ничего не выдумывай.
+- Для meeting due_date + due_time — начало встречи.
+
+ПОВТОР (recurrence)
+«каждый день» → daily; «по будням» → wd:0,1,2,3,4; «каждый понедельник и среду» → wd:0,2 \
+(Пн=0 … Вс=6); «каждое 1-е число» → monthly:1; иначе null. \
+Для повторяющейся задачи due_date — ближайшее подходящее число.
+
+ПРИМЕРЫ (пусть сейчас пятница, 30 октября 2026)
+«напомни завтра в 21:00 позвонить Андрею Викторовичу» →
+{"kind": "task", "text": "Позвонить Андрею Викторовичу", "domain": "personal", \
+"due_date": "2026-10-31", "due_time": "21:00", "recurrence": null}
+«поднять вопрос Августа Сергеевича» →
+{"kind": "task", "text": "Поднять вопрос Августа Сергеевича", "domain": "personal", \
+"due_date": null, "due_time": null, "recurrence": null}
+«созвон по REDWELD в понедельник в 11:00» →
+{"kind": "meeting", "text": "Созвон по REDWELD", "domain": "technored", \
+"due_date": "2026-11-02", "due_time": "11:00", "recurrence": null}
+«по будням в 8:00 разбирать почту» →
+{"kind": "task", "text": "Разбирать почту", "domain": "personal", \
+"due_date": "2026-11-02", "due_time": "08:00", "recurrence": "wd:0,1,2,3,4"}
+«какие у меня планы по патенту?» →
+{"kind": "question", "text": "Какие у меня планы по патенту?", "domain": "technored", \
+"due_date": null, "due_time": null, "recurrence": null}"""
+
+_RECURRENCE_RE = re.compile(r"daily|wd:[0-6](,[0-6])*|monthly:([1-9]|[12]\d|3[01])")
+
+
+def _parse_json(raw: str) -> dict | None:
+    """Достаёт JSON-объект из ответа LLM: убирает ```-обёртку, берёт от первой { до последней }."""
+    try:
+        s = (raw or "").strip()
+        s = re.sub(r"^```(?:json)?\s*", "", s)
+        s = re.sub(r"\s*```$", "", s)
+        start, end = s.find("{"), s.rfind("}")
+        if start == -1 or end <= start:
+            raise ValueError("нет JSON-объекта")
+        data = json.loads(s[start:end + 1])
+        if not isinstance(data, dict):
+            raise ValueError("не объект")
+        return data
+    except Exception:
+        logger.warning("Не удалось разобрать JSON из ответа LLM: %.500s", raw)
+        return None
 
 
 def _valid_date(value) -> str | None:
     """Возвращает ISO-дату 'YYYY-MM-DD' или None."""
     if not value or not isinstance(value, str):
         return None
-    import re
-
     return value if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value) else None
 
 
+def _valid_time(value) -> str | None:
+    """Нормализует время к 'HH:MM' или None."""
+    if not value or not isinstance(value, str):
+        return None
+    m = re.fullmatch(r"\s*(\d{1,2}):(\d{2})\s*", value)
+    if not m:
+        return None
+    hh, mm = int(m.group(1)), int(m.group(2))
+    if hh > 23 or mm > 59:
+        return None
+    return f"{hh:02d}:{mm:02d}"
+
+
+async def parse_message(text: str) -> dict | None:
+    """Единый разбор сообщения быстрой моделью.
+
+    Возвращает {kind, text, domain, due_date, due_time, recurrence} или None при ошибке.
+    """
+    try:
+        client = _get_client()
+        resp = await client.chat.completions.create(
+            model=settings.llm_fast_model,
+            max_tokens=300,
+            messages=[
+                {"role": "system", "content": _PARSE_PROMPT + "\n\n" + now_context()},
+                {"role": "user", "content": text},
+            ],
+            extra_headers={"HTTP-Referer": "https://github.com/brain-bot", "X-Title": "brain"},
+        )
+        data = _parse_json(resp.choices[0].message.content or "")
+        if data is None:
+            return None
+    except Exception:
+        logger.exception("parse_message failed")
+        return None
+
+    kind = data.get("kind")
+    if kind not in _KNOWN_KINDS:
+        kind = "question"
+    domain = data.get("domain")
+    if domain not in _KNOWN_DOMAINS:
+        domain = "personal"
+    rec = data.get("recurrence")
+    if not isinstance(rec, str) or not _RECURRENCE_RE.fullmatch(rec.strip()):
+        rec = None
+    else:
+        rec = rec.strip()
+    parsed_text = data.get("text")
+    parsed_text = parsed_text.strip() if isinstance(parsed_text, str) else ""
+    return {
+        "kind": kind,
+        "text": parsed_text or text.strip(),
+        "domain": domain,
+        "due_date": _valid_date(data.get("due_date")),
+        "due_time": _valid_time(data.get("due_time")),
+        "recurrence": rec,
+    }
+
+
 async def extract_tasks(text: str) -> list[dict]:
-    """Выделяет задачи из текста через LLM. Возвращает список {text, domain, due_date}."""
+    """Выделяет задачи из текста через LLM. Возвращает список {text, domain, due_date, due_time}."""
     if not text or not text.strip():
         return []
     client = _get_client()
@@ -139,15 +262,13 @@ async def extract_tasks(text: str) -> list[dict]:
         resp = await client.chat.completions.create(
             model=settings.llm_model,
             max_tokens=1000,
-            response_format={"type": "json_object"},
             messages=[
-                {"role": "system", "content": _EXTRACT_PROMPT},
-                {"role": "user", "content": text[:12000]},
+                {"role": "system", "content": _EXTRACT_PROMPT + "\n\n" + now_context()},
+                {"role": "user", "content": text[:30000]},
             ],
             extra_headers={"HTTP-Referer": "https://github.com/brain-bot", "X-Title": "brain"},
         )
-        raw = resp.choices[0].message.content or "{}"
-        data = json.loads(raw)
+        data = _parse_json(resp.choices[0].message.content or "")
     except Exception:
         logger.exception("extract_tasks failed")
         return []
@@ -163,7 +284,12 @@ async def extract_tasks(text: str) -> list[dict]:
         domain = it.get("domain", "personal")
         if domain not in _KNOWN_DOMAINS:
             domain = "personal"
-        result.append({"text": t, "domain": domain, "due_date": _valid_date(it.get("due_date"))})
+        result.append({
+            "text": t,
+            "domain": domain,
+            "due_date": _valid_date(it.get("due_date")),
+            "due_time": _valid_time(it.get("due_time")),
+        })
     return result
 
 
@@ -174,7 +300,7 @@ async def summarize_transcript(text: str) -> str:
         model=settings.llm_model,
         max_tokens=1500,
         messages=[
-            {"role": "system", "content": _SUMMARY_PROMPT},
+            {"role": "system", "content": _SUMMARY_PROMPT + "\n\n" + now_context()},
             {"role": "user", "content": text[:60000]},
         ],
         extra_headers={"HTTP-Referer": "https://github.com/brain-bot", "X-Title": "brain"},
@@ -218,7 +344,7 @@ async def ask_llm(question: str, chunks: list[dict]) -> str:
         model=settings.llm_model,
         max_tokens=MAX_TOKENS,
         messages=[
-            {"role": "system", "content": SYSTEM_PROMPT.format(context=context)},
+            {"role": "system", "content": SYSTEM_PROMPT.format(now=now_context(), context=context)},
             {"role": "user", "content": question},
         ],
         extra_headers={

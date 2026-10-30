@@ -5,7 +5,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     due_date DATE,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     completed_at DATETIME,
-    is_done BOOLEAN DEFAULT 0
+    is_done BOOLEAN DEFAULT 0,
+    due_time TEXT,                       -- 'HH:MM', локальное MSK
+    reminder_sent BOOLEAN DEFAULT 0,
+    recurrence TEXT                      -- как habits.schedule + 'monthly:N'
 );
 
 CREATE TABLE IF NOT EXISTS notes_index (

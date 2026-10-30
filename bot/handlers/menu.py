@@ -14,10 +14,11 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message
 
 from bot import keyboards as kb
+from bot.handlers.cards import send_task_card
 from bot.handlers.habits import cmd_habits
 from bot.handlers.meetings import add_meeting_and_reply
 from bot.handlers.notes import save_note
-from bot.handlers.tasks import cmd_today, cmd_week, create_task_from_text, format_task_added
+from bot.handlers.tasks import cmd_today, cmd_week, create_task_from_text
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +89,7 @@ async def flow_task(message: Message, state: FSMContext) -> None:
     if task is None:
         await message.answer("Не понял текст задачи. Попробуй ещё раз через ➕ Задача.")
         return
-    await message.answer(format_task_added(task))
+    await send_task_card(message, task, raw=(message.text or "").strip())
 
 
 @router.message(StateFilter(AddFlow.note), F.text)

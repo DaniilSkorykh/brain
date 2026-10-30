@@ -9,7 +9,8 @@ from aiogram import Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
-from bot.handlers.tasks import _parse_domain
+from bot.handlers.tasks import _DOMAIN_PATTERN, _parse_domain
+from bot.tools.llm import parse_message
 from db.database import add_meeting, get_upcoming_meetings
 
 logger = logging.getLogger(__name__)
@@ -28,9 +29,40 @@ def _format_dt(start_at: str) -> str:
         return start_at
 
 
-def create_meeting_from_text(raw: str) -> dict | None:
-    """Парсит '#домен текст когда' → создаёт встречу. None, если дату/время не нашли."""
-    domain, remaining = _parse_domain(raw.strip())
+def meeting_from_parsed(parsed: dict) -> dict | None:
+    """Данные встречи из llm.parse_message. None, если нет даты."""
+    if not parsed.get("due_date"):
+        return None
+    start_at = f"{parsed['due_date']} {parsed.get('due_time') or '09:00'}:00"
+    try:
+        dt = datetime.strptime(start_at, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    return {
+        "domain": parsed.get("domain") or "personal",
+        "title": parsed["text"],
+        "start_at": start_at,
+        "dt": dt,
+    }
+
+
+async def create_meeting_from_text(raw: str) -> dict | None:
+    """Парсит '#домен текст когда' → данные встречи. None, если дату/время не нашли.
+
+    Сначала LLM (parse_message), при отсутствии даты/ошибке — dateparser. Явный #домен приоритетнее.
+    """
+    raw = raw.strip()
+    explicit = bool(_DOMAIN_PATTERN.search(raw))
+    domain, remaining = _parse_domain(raw)
+
+    parsed = await parse_message(remaining)
+    if parsed is not None:
+        meeting = meeting_from_parsed(parsed)
+        if meeting is not None:
+            if explicit:
+                meeting["domain"] = domain
+            return meeting
+
     try:
         from dateparser.search import search_dates  # type: ignore[import]
 
@@ -61,9 +93,15 @@ def create_meeting_from_text(raw: str) -> dict | None:
     return {"domain": domain, "title": title, "start_at": start_at, "dt": parsed_dt}
 
 
-async def add_meeting_and_reply(message: Message, raw: str) -> None:
-    """Создаёт встречу из текста и отвечает подтверждением (общий код для /meet и FSM)."""
-    parsed = create_meeting_from_text(raw)
+async def add_meeting_and_reply(
+    message: Message, raw: str, meeting: dict | None = None, prefix: str = ""
+) -> None:
+    """Создаёт встречу из текста и отвечает карточкой (общий код для /meet, FSM и голоса).
+
+    meeting — уже разобранные данные (из meeting_from_parsed), чтобы не вызывать LLM повторно.
+    prefix — строка над карточкой (например, «🎤 Распознал: …»).
+    """
+    parsed = meeting or await create_meeting_from_text(raw)
     if parsed is None:
         await message.answer(
             "Не понял, когда встреча. Укажи дату и время.\n"
@@ -72,12 +110,14 @@ async def add_meeting_and_reply(message: Message, raw: str) -> None:
         return
 
     mid = await add_meeting(parsed["title"], parsed["domain"], parsed["start_at"])
-    await message.answer(
-        f"🤝 Встреча #{mid} добавлена\n"
-        f"Тема: {parsed['title']}\n"
-        f"Когда: {_format_dt(parsed['start_at'])}\n"
-        f"Домен: {parsed['domain']}\n\n"
-        f"Напомню за час."
+    # Локальный импорт: cards.py сам импортирует meetings.py (избегаем цикла)
+    from bot.handlers.cards import send_meeting_card
+
+    await send_meeting_card(
+        message,
+        {"id": mid, "title": parsed["title"], "domain": parsed["domain"], "start_at": parsed["start_at"]},
+        raw=raw,
+        prefix=prefix,
     )
 
 

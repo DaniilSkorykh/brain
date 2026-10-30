@@ -10,6 +10,7 @@ from bot.config import settings
 from bot.handlers import (
     admin,
     ask,
+    cards,
     extract,
     files,
     habits,
@@ -69,6 +70,7 @@ def build_dispatcher() -> Dispatcher:
     dp.include_router(tasks.router)
     dp.include_router(habits.router)
     dp.include_router(meetings.router)
+    dp.include_router(cards.router)
     dp.include_router(menu.router)
     dp.include_router(extract.router)
     dp.include_router(files.router)

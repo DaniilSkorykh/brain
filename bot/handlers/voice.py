@@ -25,12 +25,13 @@ from aiogram.types import (
 )
 
 from bot.config import settings
-from bot.handlers import files as files_mod
+from bot.handlers import extract as extract_mod
 from bot.handlers.ask import _handle_question
-from bot.handlers.meetings import add_meeting_and_reply
+from bot.handlers.cards import send_task_card
+from bot.handlers.meetings import add_meeting_and_reply, meeting_from_parsed
 from bot.handlers.notes import save_note
-from bot.handlers.tasks import create_task_from_text, format_task_added
-from bot.tools.llm import classify_intent, summarize_transcript
+from bot.handlers.tasks import create_task_from_parsed
+from bot.tools.llm import extract_tasks, parse_message, summarize_transcript
 from bot.tools.tgfiles import fetch_to
 from bot.tools.transcribe import temp_path, transcribe, transcribe_long
 from rag import indexer
@@ -99,26 +100,27 @@ async def handle_voice(message: Message, state: FSMContext) -> None:
         return
 
     prefix = f"🎤 Распознал: «{text}»"
-    intent = await classify_intent(text)
+    parsed = await parse_message(text)
 
-    if intent == "note":
+    if parsed is None or parsed["kind"] == "note":
+        # parse_message упал или это заметка — сохраняем исходный текст
         _, indexed = await save_note(text)
         reply = prefix + "\n\n📝 Сохранил как заметку"
         if not indexed:
             reply += " (индексация не удалась — /reindex)"
         await message.answer(reply)
 
-    elif intent == "task":
-        task = await create_task_from_text(text)
-        if task is None:
-            _, _ = await save_note(text)
-            await message.answer(prefix + "\n\n📝 Не понял как задачу — сохранил заметкой")
-        else:
-            await message.answer(prefix + "\n\n" + format_task_added(task))
+    elif parsed["kind"] == "task":
+        task = await create_task_from_parsed(parsed)
+        await send_task_card(message, task, raw=text, prefix=prefix)
 
-    elif intent == "meeting":
-        await message.answer(prefix)
-        await add_meeting_and_reply(message, text)
+    elif parsed["kind"] == "meeting":
+        meeting = meeting_from_parsed(parsed)
+        if meeting is not None:
+            await add_meeting_and_reply(message, text, meeting, prefix=prefix)
+        else:
+            await message.answer(prefix)
+            await add_meeting_and_reply(message, text)  # нет даты — старый путь (dateparser)
 
     else:  # question
         await message.answer(prefix + "\n\n💬 Отвечаю…")
@@ -241,17 +243,14 @@ async def on_lecture_domain(callback: CallbackQuery, state: FSMContext) -> None:
             await callback.message.edit_text("Не удалось сохранить конспект.")
         return
 
-    # Готовим кнопку «Извлечь задачи» (переиспользуем механизм из files.py)
-    if callback.from_user:
-        files_mod._last_upload[callback.from_user.id] = str(dest)
-    extract_kb = InlineKeyboardMarkup(
-        inline_keyboard=[[
-            InlineKeyboardButton(text="📋 Извлечь задачи", callback_data="extractfile")
-        ]]
+    if not callback.message:
+        return
+    await callback.message.edit_text(
+        f"📄 Конспект сохранён: {domain}/{dest.name}. Ищется через /ask.\n"
+        f"🔍 Ищу задачи…"
     )
-    if callback.message:
-        await callback.message.edit_text(
-            f"📄 Конспект сохранён: {domain}/{dest.name}.\n"
-            f"Ищется через /ask. Достать задачи из записи?",
-            reply_markup=extract_kb,
-        )
+    # summary первым — в нём раздел «Задачи»
+    candidates = await extract_tasks(f"{summary}\n\n{transcript}")
+    await extract_mod.present_candidates(
+        callback.message, candidates, state, empty_text="Задач в записи не нашёл 🤷"
+    )

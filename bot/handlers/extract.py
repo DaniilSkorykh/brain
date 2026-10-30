@@ -17,6 +17,7 @@ from aiogram.types import (
     Message,
 )
 
+from bot.handlers.tasks import _format_due
 from bot.tools.llm import extract_tasks
 from db.database import add_task
 
@@ -43,15 +44,20 @@ def _build_markup(candidates: list[dict], added: list[int]) -> InlineKeyboardMar
 def _format_list(candidates: list[dict]) -> str:
     lines = [f"📋 Нашёл задач: {len(candidates)}. Отметь, что добавить:", ""]
     for i, c in enumerate(candidates, 1):
-        due = f" — {c['due_date']}" if c["due_date"] else ""
+        due = f" — {_format_due(c['due_date'], c.get('due_time'))}" if c.get("due_date") else ""
         lines.append(f"{i}. {c['text']} ({c['domain']}){due}")
     return "\n".join(lines)
 
 
-async def present_candidates(message: Message, candidates: list[dict], state: FSMContext) -> None:
-    """Показывает извлечённые задачи с кнопками. Вызывается из /extract и из files.py."""
+async def present_candidates(
+    message: Message,
+    candidates: list[dict],
+    state: FSMContext,
+    empty_text: str = "Задач в тексте не нашёл 🤷",
+) -> None:
+    """Показывает извлечённые задачи с кнопками. Вызывается из /extract, files.py и voice.py."""
     if not candidates:
-        await message.answer("Задач в тексте не нашёл 🤷")
+        await message.answer(empty_text)
         return
     await state.set_state(ExtractFlow.review)
     await state.update_data(candidates=candidates, added=[])
@@ -90,7 +96,7 @@ async def cb_add_one(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer("Уже добавлено")
         return
     c = candidates[idx]
-    await add_task(c["text"], c["domain"], c["due_date"])
+    await add_task(c["text"], c["domain"], c["due_date"], c.get("due_time"))
     added.append(idx)
     await state.update_data(added=added)
     await callback.answer(f"✅ {c['text'][:40]}")
@@ -106,7 +112,7 @@ async def cb_add_all(callback: CallbackQuery, state: FSMContext) -> None:
     new = 0
     for i, c in enumerate(candidates):
         if i not in added:
-            await add_task(c["text"], c["domain"], c["due_date"])
+            await add_task(c["text"], c["domain"], c["due_date"], c.get("due_time"))
             new += 1
     await state.clear()
     await callback.answer(f"Добавил: {new}")
