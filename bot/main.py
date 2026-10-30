@@ -38,6 +38,7 @@ BOT_COMMANDS = [
     BotCommand(command="meet", description="Добавить встречу (напомню за час)"),
     BotCommand(command="meetings", description="Ближайшие встречи"),
     BotCommand(command="extract", description="Извлечь задачи из текста встречи"),
+    BotCommand(command="weekly", description="Итоги недели"),
     BotCommand(command="help", description="Список команд"),
 ]
 

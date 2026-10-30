@@ -11,9 +11,14 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from bot.config import settings
-from bot.handlers.habits import _streak_for
+from bot.handlers.habits import _week_for
 from bot.handlers.tasks import build_evening_view, task_line
 from db.database import (
+    count_done_tasks_between,
+    get_active_habits,
+    get_meetings_between,
+    get_overdue_tasks,
+    get_tasks_between,
     get_due_meetings,
     get_due_task_reminders,
     get_habits_due,
@@ -57,9 +62,8 @@ async def send_morning_digest(bot: Bot) -> None:
         hlines = ["🔁 Привычки на сегодня:"]
         rows: list[list[InlineKeyboardButton]] = []
         for h in habits:
-            s = await _streak_for(h["id"], h["schedule"])
-            flame = f"🔥 {s}" if s > 0 else "—"
-            hlines.append(f"• {h['title']} {flame}")
+            week = await _week_for(h["id"], h["schedule"])
+            hlines.append(f"• {h['title']} {week}")
             rows.append([
                 InlineKeyboardButton(
                     text=f"✅ {h['title'][:30]}",
@@ -76,6 +80,58 @@ async def send_evening_review(bot: Bot) -> None:
     uid = settings.telegram_allowed_user_id
     text, markup = await build_evening_view()
     await bot.send_message(uid, text, reply_markup=markup)
+
+
+async def send_weekly_review(bot: Bot) -> None:
+    """Итоги недели без LLM: закрытое, просрочка, привычки, план на следующую неделю."""
+    uid = settings.telegram_allowed_user_id
+    today = date.today()
+    start = today - timedelta(days=6)
+    today_iso = today.isoformat()
+
+    done = await count_done_tasks_between(start.isoformat(), today_iso)
+    overdue = await get_overdue_tasks(today_iso)
+
+    lines = [
+        f"📊 Итоги недели ({start.strftime('%d.%m')}–{today.strftime('%d.%m')})",
+        f"✅ Закрыто задач: {done}",
+        f"🔴 Просрочено: {len(overdue)}",
+    ]
+    for t in overdue[:5]:
+        lines.append("  " + task_line(t))
+    if len(overdue) > 5:
+        lines.append(f"  … и ещё {len(overdue) - 5}")
+
+    habits = await get_active_habits()
+    if habits:
+        lines.append("🔁 Привычки:")
+        for h in habits:
+            lines.append(f"• {h['title']} {await _week_for(h['id'], h['schedule'])}")
+
+    nxt_start = (today + timedelta(days=1)).isoformat()
+    nxt_end = (today + timedelta(days=7)).isoformat()
+    tasks = await get_tasks_between(nxt_start, nxt_end)
+    meetings = await get_meetings_between(nxt_start, nxt_end)
+    lines.append(f"🗓 На следующей неделе — задач: {len(tasks)}, встреч: {len(meetings)}")
+    for t in tasks[:7]:
+        lines.append("  " + task_line(t, week=True))
+    if len(tasks) > 7:
+        lines.append(f"  … и ещё {len(tasks) - 7}")
+    for m in meetings:
+        try:
+            when = datetime.strptime(m["start_at"], "%Y-%m-%d %H:%M:%S").strftime("%d.%m %H:%M")
+        except ValueError:
+            when = m["start_at"]
+        lines.append(f"  📅 {m['title']} — {when}")
+
+    markup = None
+    if overdue:
+        markup = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(
+                text="⏭ Перенести просроченное на понедельник", callback_data="weekmove"
+            )
+        ]])
+    await bot.send_message(uid, "\n".join(lines), reply_markup=markup)
 
 
 async def check_reminders(bot: Bot) -> None:
@@ -129,6 +185,18 @@ def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
         replace_existing=True,
     )
 
+    w_h, w_m = _parse_hm(settings.weekly_review_time)
+    scheduler.add_job(
+        send_weekly_review,
+        CronTrigger(
+            day_of_week=settings.weekly_review_day, hour=w_h, minute=w_m,
+            timezone=settings.timezone,
+        ),
+        args=[bot],
+        id="weekly_review",
+        replace_existing=True,
+    )
+
     scheduler.add_job(
         check_reminders,
         IntervalTrigger(minutes=1),
@@ -140,7 +208,8 @@ def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
     scheduler.start()
     logger.info(
         "Планировщик запущен (TZ=%s): утро %02d:%02d, вечер %02d:%02d, "
-        "напоминания о встречах за %d мин",
-        settings.timezone, m_h, m_m, e_h, e_m, settings.meeting_reminder_min,
+        "итоги недели %s %02d:%02d, напоминания о встречах за %d мин",
+        settings.timezone, m_h, m_m, e_h, e_m,
+        settings.weekly_review_day, w_h, w_m, settings.meeting_reminder_min,
     )
     return scheduler

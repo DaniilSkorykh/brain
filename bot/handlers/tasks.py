@@ -15,12 +15,17 @@ from aiogram.types import (
 )
 
 from bot.tools.llm import parse_message
+from bot.tools.schedule import WEEKDAYS_RU, next_occurrence
 from db.database import (
     add_task,
     complete_task,
+    get_overdue_recurring,
+    get_task,
     get_today_tasks,
     get_week_tasks,
+    move_overdue_to,
     rollover_unfinished,
+    update_task_due,
 )
 
 logger = logging.getLogger(__name__)
@@ -96,23 +101,7 @@ def _parse_due(text: str) -> tuple[str | None, str]:
         return None, text
 
 
-_WEEKDAYS_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
-
-
-def human_recurrence(rec: str | None) -> str:
-    """'daily' -> 'каждый день', 'wd:0,2' -> 'Пн, Ср', 'monthly:1' -> 'каждое 1-е число'."""
-    if not rec:
-        return ""
-    if rec == "daily":
-        return "каждый день"
-    if rec.startswith("wd:"):
-        days = [int(d) for d in rec[3:].split(",") if d.isdigit() and int(d) < 7]
-        if days == [0, 1, 2, 3, 4]:
-            return "по будням"
-        return ", ".join(_WEEKDAYS_RU[d] for d in days)
-    if rec.startswith("monthly:"):
-        return f"каждое {rec[8:]}-е число"
-    return rec
+_WEEKDAYS_RU = WEEKDAYS_RU
 
 
 def _format_due(due_date: str | None, due_time: str | None) -> str:
@@ -130,11 +119,44 @@ def _format_due(due_date: str | None, due_time: str | None) -> str:
 def task_line(t: dict, week: bool = False) -> str:
     """Строка задачи для списков. Обычная: '🟢 21:00 текст (домен)'; week: '🟡 текст — 2026-10-31 21:00'."""
     emoji = urgency_emoji(t["due_date"])
+    rec = " 🔁" if t.get("recurrence") else ""
     if week:
         when = f"{t['due_date']} {t['due_time']}" if t.get("due_time") else t["due_date"]
-        return f"{emoji} {t['text']} — {when}"
+        return f"{emoji} {t['text']}{rec} — {when}"
     time_part = f"{t['due_time']} " if t.get("due_time") else ""
-    return f"{emoji} {time_part}{t['text']} ({t['domain']})"
+    return f"{emoji} {time_part}{t['text']}{rec} ({t['domain']})"
+
+
+async def complete_task_and_repeat(task_id: int) -> dict | None:
+    """Закрывает задачу; если она повторяющаяся — создаёт следующий экземпляр и возвращает его."""
+    task = await get_task(task_id)
+    if task and task.get("is_done"):
+        return None  # повторное нажатие ✅ — следующий экземпляр уже создан
+    await complete_task(task_id)
+    if not task or not task.get("recurrence") or not task.get("due_date"):
+        return None
+    try:
+        base = max(date.fromisoformat(task["due_date"]), date.today())
+    except ValueError:
+        return None
+    nxt = next_occurrence(task["recurrence"], base)
+    if nxt is None:
+        return None
+    new_id = await add_task(
+        task["text"], task["domain"], nxt.isoformat(), task.get("due_time"), task["recurrence"]
+    )
+    return {
+        "id": new_id,
+        "text": task["text"],
+        "domain": task["domain"],
+        "due_date": nxt.isoformat(),
+        "due_time": task.get("due_time"),
+        "recurrence": task["recurrence"],
+    }
+
+
+def _next_hint(nxt: dict | None) -> str:
+    return f" · 🔁 следующая: {_format_due(nxt['due_date'], nxt['due_time'])}" if nxt else ""
 
 
 async def create_task_from_parsed(parsed: dict) -> dict:
@@ -290,8 +312,8 @@ async def build_evening_view() -> tuple[str, InlineKeyboardMarkup | None]:
 @router.callback_query(F.data.startswith("done:"))
 async def cb_done(callback: CallbackQuery) -> None:
     task_id = int(callback.data.split(":", 1)[1])
-    await complete_task(task_id)
-    await callback.answer("Готово ✅")
+    nxt = await complete_task_and_repeat(task_id)
+    await callback.answer("Готово ✅" + _next_hint(nxt))
     text, markup = await build_evening_view()
     if callback.message:
         await callback.message.edit_text(text, reply_markup=markup)
@@ -301,18 +323,43 @@ async def cb_done(callback: CallbackQuery) -> None:
 async def cb_task_reminder_done(callback: CallbackQuery) -> None:
     """Кнопка «✅ Сделано» под напоминанием о задаче."""
     task_id = int(callback.data.split(":", 1)[1])
-    await complete_task(task_id)
-    await callback.answer("Готово ✅")
+    nxt = await complete_task_and_repeat(task_id)
+    await callback.answer("Готово ✅" + _next_hint(nxt))
     if callback.message and callback.message.text:
         await callback.message.edit_text(callback.message.text + "\n\n✅ Сделано", reply_markup=None)
 
 
 @router.callback_query(F.data == "rollover")
 async def cb_rollover(callback: CallbackQuery) -> None:
-    tomorrow = (date.today() + timedelta(days=1)).isoformat()
+    today = date.today()
+    tomorrow = (today + timedelta(days=1)).isoformat()
     moved = await rollover_unfinished(tomorrow)
+    # Повторяющиеся не переносим на завтра, а «перешагиваем» на ближайшую дату строго после сегодня
+    for t in await get_overdue_recurring(tomorrow):  # срок <= сегодня
+        nxt = next_occurrence(t["recurrence"], today)
+        if nxt:
+            await update_task_due(t["id"], nxt.isoformat(), t.get("due_time"))
+            moved += 1
     await callback.answer(f"Перенесено: {moved}")
     if callback.message:
         await callback.message.edit_text(
             f"⏭ Перенёс на завтра задач: {moved}.\nЗавтра утром напомню. Спокойной ночи 🌙"
+        )
+
+
+@router.callback_query(F.data == "weekmove")
+async def cb_weekmove(callback: CallbackQuery) -> None:
+    """Итоги недели: просроченное → на ближайший понедельник (повторяющиеся — на след. дату)."""
+    today = date.today()
+    monday = today + timedelta(days=7 - today.weekday())  # строго следующий понедельник
+    moved = await move_overdue_to(monday.isoformat())
+    for t in await get_overdue_recurring(today.isoformat()):
+        nxt = next_occurrence(t["recurrence"], today)
+        if nxt:
+            await update_task_due(t["id"], nxt.isoformat(), t.get("due_time"))
+            moved += 1
+    await callback.answer(f"Перенесено: {moved}")
+    if callback.message and callback.message.text:
+        await callback.message.edit_text(
+            callback.message.text + f"\n\n⏭ Перенёс: {moved}", reply_markup=None
         )

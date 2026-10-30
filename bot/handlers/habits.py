@@ -1,4 +1,4 @@
-"""Привычки / регулярные дела со стрик-счётчиками.
+﻿"""Привычки / регулярные дела со стрик-счётчиками.
 
 Регистрируется ДО ask.router. Расписание хранится как 'daily' или 'wd:0,2,4' (Пн=0).
 """
@@ -18,6 +18,7 @@ from aiogram.types import (
 )
 
 from bot.handlers.tasks import _parse_domain
+from bot.tools.schedule import human_schedule, is_scheduled
 from db.database import (
     add_habit,
     deactivate_habit,
@@ -29,8 +30,6 @@ from db.database import (
 logger = logging.getLogger(__name__)
 
 router = Router()
-
-_WEEKDAYS_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 
 # Токены дней недели → индекс (Пн=0). Покрываем сокращения и полные формы.
 _WD_TOKENS = {
@@ -96,23 +95,6 @@ def _strip_tokens(text: str, tokens: list[str]) -> str:
     return result
 
 
-def _human_schedule(schedule: str) -> str:
-    if schedule == "daily":
-        return "каждый день"
-    if schedule.startswith("wd:"):
-        days = [int(d) for d in schedule[3:].split(",") if d != ""]
-        return ", ".join(_WEEKDAYS_RU[d] for d in days)
-    return schedule
-
-
-def _is_scheduled(day: date, schedule: str) -> bool:
-    if schedule == "daily":
-        return True
-    if schedule.startswith("wd:"):
-        return str(day.weekday()) in schedule[3:].split(",")
-    return False
-
-
 def streak(log_dates: list[str], schedule: str, today: date | None = None) -> int:
     """Считает текущий стрик: подряд идущие запланированные дни с отметкой.
 
@@ -124,7 +106,7 @@ def streak(log_dates: list[str], schedule: str, today: date | None = None) -> in
     day = today
     # Ограничение на случай пустого/битого расписания
     for _ in range(366):
-        if _is_scheduled(day, schedule):
+        if is_scheduled(day, schedule):
             iso = day.isoformat()
             if iso in done:
                 count += 1
@@ -149,6 +131,31 @@ def create_habit_from_text(raw: str) -> dict | None:
 def habit_button(habit_id: int) -> InlineKeyboardButton:
     """Кнопка отметки привычки (для дайджеста и /habits)."""
     return InlineKeyboardButton(text="✅ Сделал", callback_data=f"habdone:{habit_id}")
+
+
+def week_marks(log_dates: list[str], schedule: str, today: date | None = None) -> str:
+    """Последние 7 дней: ✅ отмечено, ▫ пропуск, · не по расписанию. В конце ' X/Y'."""
+    today = today or date.today()
+    done = set(log_dates)
+    marks: list[str] = []
+    x = y = 0
+    for i in range(6, -1, -1):
+        day = today - timedelta(days=i)
+        if is_scheduled(day, schedule):
+            y += 1
+            if day.isoformat() in done:
+                x += 1
+                marks.append("✅")
+            else:
+                marks.append("▫")
+        else:
+            marks.append("·")
+    return f"{''.join(marks)} {x}/{y}"
+
+
+async def _week_for(habit_id: int, schedule: str) -> str:
+    dates = await get_habit_log_dates(habit_id)
+    return week_marks(dates, schedule)
 
 
 async def _streak_for(habit_id: int, schedule: str) -> int:
@@ -180,7 +187,7 @@ async def cmd_habit(message: Message, command: CommandObject) -> None:
     await message.answer(
         f"🔁 Привычка #{hid} добавлена\n"
         f"Что: {habit['title']}\n"
-        f"Когда: {_human_schedule(habit['schedule'])}\n"
+        f"Когда: {human_schedule(habit['schedule'])}\n"
         f"Домен: {habit['domain']}"
     )
 
@@ -199,11 +206,10 @@ async def cmd_habits(message: Message) -> None:
     lines = ["🔁 Твои привычки:"]
     rows: list[list[InlineKeyboardButton]] = []
     for h in habits:
-        s = await _streak_for(h["id"], h["schedule"])
-        flame = f"🔥 {s}" if s > 0 else "—"
-        due_today = _is_scheduled(date.today(), h["schedule"])
+        week = await _week_for(h["id"], h["schedule"])
+        due_today = is_scheduled(date.today(), h["schedule"])
         mark = " · сегодня" if due_today else ""
-        lines.append(f"• {h['title']} ({_human_schedule(h['schedule'])}) {flame}{mark}")
+        lines.append(f"• {h['title']} ({human_schedule(h['schedule'])}) {week}{mark}")
         if due_today:
             rows.append([
                 InlineKeyboardButton(
@@ -228,8 +234,8 @@ async def cb_habit_done(callback: CallbackQuery) -> None:
             sched = h["schedule"]
             title = h["title"]
             break
-    s = streak(await get_habit_log_dates(habit_id), sched)
-    await callback.answer(f"🔥 {s} — так держать!" if s > 0 else "Отмечено ✅")
+    week = week_marks(await get_habit_log_dates(habit_id), sched)
+    await callback.answer(f"✅ Отмечено · {week.rsplit(' ', 1)[1]} за неделю")
     if callback.message and title:
         # Тихо подтверждаем в чате отдельным сообщением (не ломаем дайджест-список)
-        await callback.message.answer(f"✅ {title} — 🔥 {s}")
+        await callback.message.answer(f"✅ {title} {week}")

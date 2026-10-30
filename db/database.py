@@ -254,13 +254,14 @@ async def get_upcoming_meetings(limit: int = 10) -> list[dict]:
 
 
 async def rollover_unfinished(to_date: str) -> int:
-    """Переносит невыполненные задачи (срок <= сегодня) на дату to_date. Возвращает число перенесённых."""
+    """Переносит невыполненные неповторяющиеся задачи (срок <= сегодня) на to_date. Возвращает число."""
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
             """
             UPDATE tasks
             SET due_date = ?, reminder_sent = 0
             WHERE is_done = 0
+              AND recurrence IS NULL
               AND due_date IS NOT NULL
               AND due_date <= date('now', 'localtime')
             """,
@@ -345,10 +346,92 @@ async def complete_task(task_id: int) -> bool:
         cursor = await db.execute(
             """
             UPDATE tasks
-            SET is_done = 1, completed_at = CURRENT_TIMESTAMP
+            SET is_done = 1, completed_at = datetime('now', 'localtime')
             WHERE id = ? AND is_done = 0
             """,
             (task_id,),
         )
         await db.commit()
         return cursor.rowcount > 0
+
+
+async def count_done_tasks_between(start_iso: str, end_iso: str) -> int:
+    """Число задач, закрытых в диапазоне дат (включительно, по completed_at)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM tasks WHERE is_done = 1 "
+            "AND date(completed_at) BETWEEN ? AND ?",
+            (start_iso, end_iso),
+        )
+        row = await cursor.fetchone()
+        return row[0] if row else 0
+
+
+async def get_overdue_tasks(today_iso: str) -> list[dict]:
+    """Незакрытые задачи со сроком раньше today_iso."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT id, text, domain, due_date, due_time, recurrence
+            FROM tasks
+            WHERE is_done = 0 AND due_date IS NOT NULL AND due_date < ?
+            ORDER BY due_date ASC, due_time IS NULL, due_time ASC
+            """,
+            (today_iso,),
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+
+async def get_tasks_between(start_iso: str, end_iso: str) -> list[dict]:
+    """Незакрытые задачи со сроком в диапазоне дат (включительно)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT id, text, domain, due_date, due_time, recurrence
+            FROM tasks
+            WHERE is_done = 0 AND due_date BETWEEN ? AND ?
+            ORDER BY due_date ASC, due_time IS NULL, due_time ASC
+            """,
+            (start_iso, end_iso),
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+
+async def get_meetings_between(start_iso: str, end_iso: str) -> list[dict]:
+    """Встречи, начинающиеся в диапазоне дат (включительно)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT id, title, domain, start_at
+            FROM meetings
+            WHERE date(start_at) BETWEEN ? AND ?
+            ORDER BY start_at ASC
+            """,
+            (start_iso, end_iso),
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+
+async def move_overdue_to(date_iso: str) -> int:
+    """Переносит просроченные неповторяющиеся задачи на date_iso. Возвращает число."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            """
+            UPDATE tasks
+            SET due_date = ?, reminder_sent = 0
+            WHERE is_done = 0 AND recurrence IS NULL
+              AND due_date IS NOT NULL
+              AND due_date < date('now', 'localtime')
+            """,
+            (date_iso,),
+        )
+        await db.commit()
+        return cursor.rowcount
+
+
+async def get_overdue_recurring(today_iso: str) -> list[dict]:
+    """Просроченные (срок < today_iso) повторяющиеся задачи."""
+    return [t for t in await get_overdue_tasks(today_iso) if t.get("recurrence")]

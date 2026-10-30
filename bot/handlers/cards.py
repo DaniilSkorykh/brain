@@ -1,4 +1,4 @@
-"""Карточки задачи/встречи с inline-кнопками: смена типа, времени, удаление.
+﻿"""Карточки задачи/встречи с inline-кнопками: смена типа, времени, удаление.
 
 Регистрируется ДО menu.router и ask.router (FSM-состояние ловится раньше catch-all).
 """
@@ -21,8 +21,9 @@ from aiogram.types import (
 from bot import keyboards as kb
 from bot.handlers.meetings import _format_dt, meeting_from_parsed
 from bot.handlers.notes import save_note
-from bot.handlers.tasks import _format_due, create_task_from_parsed, human_recurrence
+from bot.handlers.tasks import _format_due, create_task_from_parsed
 from bot.tools.llm import parse_message
+from bot.tools.schedule import human_schedule
 from db.database import (
     add_meeting,
     clear_task_recurrence,
@@ -72,7 +73,7 @@ def render_task_card(task: dict) -> tuple[str, InlineKeyboardMarkup]:
         f"📅 {_format_due(task.get('due_date'), task.get('due_time'))} · {task['domain']}"
     )
     if task.get("recurrence"):
-        text += f"\n🔁 {human_recurrence(task['recurrence'])}"
+        text += f"\n🔁 {human_schedule(task['recurrence'])}"
     tid = task["id"]
     rows = [
         [_btn("🤝 Это встреча", f"card:tomeet:{tid}"), _btn("📝 Это заметка", f"card:tonote:task:{tid}")],

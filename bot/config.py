@@ -36,8 +36,10 @@ class Settings(BaseSettings):
 
     # Планировщик / напоминания
     timezone: str = "Europe/Moscow"
-    morning_time: str = "09:00"          # утренний дайджест задач
+    morning_time: str = "07:00"          # утренний дайджест задач
     evening_time: str = "23:00"          # вечерняя сводка
+    weekly_review_day: str = "sun"       # день недели итогов (cron: mon..sun)
+    weekly_review_time: str = "20:00"    # время итогов недели
     meeting_reminder_min: int = 60       # за сколько минут напоминать о встрече
 
     # Голос
