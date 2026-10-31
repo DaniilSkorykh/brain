@@ -217,8 +217,36 @@ async def cmd_habits(message: Message) -> None:
                     callback_data=f"habdone:{h['id']}",
                 )
             ])
-    markup = InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
-    await message.answer("\n".join(lines), reply_markup=markup)
+    rows.append([InlineKeyboardButton(text="🗑 Убрать привычку", callback_data="habmanage")])
+    await message.answer("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+
+@router.callback_query(F.data == "habmanage")
+async def cb_habit_manage(callback: CallbackQuery) -> None:
+    habits = await get_active_habits()
+    if not habits:
+        await callback.answer("Привычек нет")
+        return
+    rows = [
+        [InlineKeyboardButton(text=f"🗑 {h['title'][:40]}", callback_data=f"habdel:{h['id']}")]
+        for h in habits
+    ]
+    await callback.answer()
+    await callback.message.answer(
+        "Какую привычку убрать? История отметок сохранится.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+
+
+@router.callback_query(F.data.startswith("habdel:"))
+async def cb_habit_delete(callback: CallbackQuery) -> None:
+    habit_id = int(callback.data.split(":", 1)[1])
+    title = next((h["title"] for h in await get_active_habits() if h["id"] == habit_id), None)
+    if title is None or not await deactivate_habit(habit_id):
+        await callback.answer("Уже убрана")
+        return
+    await callback.answer("Убрано")
+    await callback.message.edit_text(f"🗑 Привычка «{title}» убрана. Больше не буду о ней напоминать.")
 
 
 @router.callback_query(F.data.startswith("habdone:"))
