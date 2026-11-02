@@ -110,9 +110,14 @@ def index_file(path: Path) -> dict:
         collection = get_collection()
 
         raw = path.read_text(encoding="utf-8")
-        post = frontmatter.loads(raw)
-        body: str = post.content
-        meta: dict = post.metadata
+        try:
+            post = frontmatter.loads(raw)
+            body: str = post.content
+            meta: dict = post.metadata
+        except Exception:
+            # Битая шапка (например, двоеточие в title без кавычек) — индексируем текст как есть
+            logger.warning("Не разобрал frontmatter в %s — индексирую без метаданных", path)
+            body, meta = raw, {}
 
         current_hash = _file_hash(raw)
         rel = _rel_path(path)

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from datetime import datetime
@@ -226,7 +227,7 @@ async def on_lecture_domain(callback: CallbackQuery, state: FSMContext) -> None:
 
     frontmatter = (
         f"---\n"
-        f"title: {title}\n"
+        f"title: {json.dumps(title, ensure_ascii=False)}\n"
         f"date: {now.strftime('%Y-%m-%d')}\n"
         f"domain: {domain}\n"
         f"tags: [transcript]\n"
