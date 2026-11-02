@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     knowledge_dir: str = "/app/knowledge"
     chroma_dir: str = "/app/chroma_db"
     sqlite_path: str = "/app/db/brain.sqlite"
+    # Куда бот складывает свои файлы (относительно knowledge_dir); синхронизируется на ПК
+    bot_inbox_dir: str = "ministry/ВХОДЯЩИЕ-ИЗ-БОТА"
 
     # RAG settings
     embedding_model: str = "intfloat/multilingual-e5-base"
@@ -41,6 +43,7 @@ class Settings(BaseSettings):
     weekly_review_day: str = "sun"       # день недели итогов (cron: mon..sun)
     weekly_review_time: str = "20:00"    # время итогов недели
     meeting_reminder_min: int = 60       # за сколько минут напоминать о встрече
+    index_poll_min: int = 2              # как часто подхватывать изменения файлов (Syncthing)
 
     # Голос
     whisper_model: str = "openai/whisper-1"

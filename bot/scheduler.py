@@ -1,6 +1,7 @@
 """Планировщик фоновых задач: утренний дайджест, вечерняя сводка, напоминания о встречах и задачах."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import date, datetime, timedelta
 
@@ -26,6 +27,7 @@ from db.database import (
     mark_meeting_reminded,
     mark_task_reminded,
 )
+from rag import indexer
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +165,19 @@ async def check_reminders(bot: Bot) -> None:
             logger.exception("Не удалось отправить напоминание о задаче %s", t["id"])
 
 
+async def sync_index() -> None:
+    """Подхватывает изменения в knowledge/ (в т.ч. пришедшие через Syncthing)."""
+    try:
+        summary = await asyncio.to_thread(indexer.reindex_all)
+        if summary["indexed"] > 0 or summary["removed"] > 0:
+            logger.info(
+                "Синхронизация индекса: переиндексировано %d, удалено %d",
+                summary["indexed"], summary["removed"],
+            )
+    except Exception:
+        logger.exception("Ошибка синхронизации индекса")
+
+
 def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
     """Создаёт и запускает планировщик с регулярными задачами."""
     scheduler = AsyncIOScheduler(timezone=settings.timezone)
@@ -205,11 +220,22 @@ def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
         replace_existing=True,
     )
 
+    scheduler.add_job(
+        sync_index,
+        IntervalTrigger(minutes=settings.index_poll_min),
+        id="sync_index",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+
     scheduler.start()
     logger.info(
         "Планировщик запущен (TZ=%s): утро %02d:%02d, вечер %02d:%02d, "
-        "итоги недели %s %02d:%02d, напоминания о встречах за %d мин",
+        "итоги недели %s %02d:%02d, напоминания о встречах за %d мин, "
+        "синхронизация индекса каждые %d мин",
         settings.timezone, m_h, m_m, e_h, e_m,
         settings.weekly_review_day, w_h, w_m, settings.meeting_reminder_min,
+        settings.index_poll_min,
     )
     return scheduler

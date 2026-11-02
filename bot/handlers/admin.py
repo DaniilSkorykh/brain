@@ -48,6 +48,7 @@ async def cmd_reindex(message: Message) -> None:
             f"Проиндексировано заново: {summary['indexed']}\n"
             f"Пропущено (без изменений): {summary['skipped']}\n"
             f"Пустых файлов: {summary['empty']}\n"
+            f"Удалено из индекса: {summary['removed']}\n"
             f"Итого чанков в базе: {summary['chunks']}"
         )
         await message.answer(text)

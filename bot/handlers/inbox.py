@@ -24,6 +24,7 @@ from bot.config import settings
 from bot.handlers import files
 from bot.handlers.notes import save_note
 from bot.tools.llm import summarize_short
+from bot.tools.paths import bot_output_dir
 from bot.tools.web import fetch_article
 from rag import indexer
 
@@ -107,8 +108,7 @@ def _origin_name(message: Message) -> str:
 
 
 def _unique_path(prefix: str) -> Path:
-    inbox_dir = Path(settings.knowledge_dir) / "inbox"
-    inbox_dir.mkdir(parents=True, exist_ok=True)
+    inbox_dir = bot_output_dir("inbox")
     stamp = datetime.now().strftime("%Y-%m-%d-%H%M")
     dest = inbox_dir / f"{prefix}-{stamp}.md"
     i = 2
@@ -119,7 +119,7 @@ def _unique_path(prefix: str) -> Path:
 
 
 def _frontmatter(title: str, tag: str, extra: dict[str, str]) -> str:
-    # domain: inbox + папка inbox/ — как в notes.save_note
+    # domain: inbox + папка <bot_inbox_dir>/inbox/ — как в notes.save_note
     lines = [
         "---",
         f"title: {_q(title)}",

@@ -8,6 +8,7 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
 from bot.config import settings
+from bot.tools.paths import bot_output_dir
 from rag import indexer
 
 logger = logging.getLogger(__name__)
@@ -47,7 +48,7 @@ async def cmd_start(message: Message) -> None:
 
 
 async def save_note(text: str) -> tuple[Path, bool]:
-    """Сохраняет заметку в inbox/YYYY-MM-DD.md и индексирует. Возвращает (файл, indexed_ok).
+    """Сохраняет заметку в <bot_inbox_dir>/inbox/YYYY-MM-DD.md и индексирует. Возвращает (файл, indexed_ok).
 
     Переиспользуется командой /note, FSM-флоу и голосовыми сообщениями.
     """
@@ -55,8 +56,7 @@ async def save_note(text: str) -> tuple[Path, bool]:
     date_str = today.strftime("%Y-%m-%d")
     time_str = today.strftime("%H:%M")
 
-    inbox_dir = Path(settings.knowledge_dir) / "inbox"
-    inbox_dir.mkdir(parents=True, exist_ok=True)
+    inbox_dir = bot_output_dir("inbox")
 
     note_file = inbox_dir / f"{date_str}.md"
 

@@ -19,6 +19,7 @@ from aiogram.types import (
 from bot.config import settings
 from bot.handlers.extract import present_candidates
 from bot.tools.llm import extract_tasks
+from bot.tools.paths import bot_output_dir
 from bot.tools.tgfiles import fetch_to
 from rag import indexer
 
@@ -92,8 +93,7 @@ async def on_domain_chosen(callback: CallbackQuery, state: FSMContext) -> None:
 
     await callback.answer("Загружаю…")
 
-    dest_dir = Path(settings.knowledge_dir) / domain
-    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_dir = bot_output_dir(domain)
     safe = _safe_md_name(file_name)
     dest = dest_dir / safe
     i = 1

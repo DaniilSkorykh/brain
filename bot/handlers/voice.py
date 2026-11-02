@@ -32,6 +32,7 @@ from bot.handlers.meetings import add_meeting_and_reply, meeting_from_parsed
 from bot.handlers.notes import save_note
 from bot.handlers.tasks import create_task_from_parsed
 from bot.tools.llm import extract_tasks, parse_message, summarize_transcript
+from bot.tools.paths import bot_output_dir
 from bot.tools.tgfiles import fetch_to
 from bot.tools.transcribe import temp_path, transcribe, transcribe_long
 from rag import indexer
@@ -220,8 +221,7 @@ async def on_lecture_domain(callback: CallbackQuery, state: FSMContext) -> None:
     stamp = now.strftime("%Y-%m-%d-%H%M")
     title = _derive_title(summary)
 
-    dest_dir = Path(settings.knowledge_dir) / domain
-    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_dir = bot_output_dir(domain)
     dest = dest_dir / f"transcript-{stamp}.md"
 
     frontmatter = (

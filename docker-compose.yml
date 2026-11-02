@@ -33,7 +33,28 @@ services:
     ports:
       - "8443:8443"
 
+  # Синхронизация knowledge/ministry ↔ папка «Молодежное служение и проекты» на ПК.
+  # Панель управления — только с самого сервера (ssh -L 8384:127.0.0.1:8384).
+  syncthing:
+    image: syncthing/syncthing:latest
+    restart: unless-stopped
+    hostname: brain-vps
+    environment:
+      # root — чтобы править файлы, которые создаёт бот (он тоже работает от root)
+      PUID: 0
+      PGID: 0
+      TZ: Europe/Moscow
+    volumes:
+      - syncthing_config:/var/syncthing/config
+      - ./knowledge/ministry:/data/ministry
+    ports:
+      - "127.0.0.1:8384:8384"
+      - "22000:22000/tcp"
+      - "22000:22000/udp"
+    mem_limit: 200m
+
 volumes:
   chroma_data:
   hf_cache:
   tg_bot_api:
+  syncthing_config:
